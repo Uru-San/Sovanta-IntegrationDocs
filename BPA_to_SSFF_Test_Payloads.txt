@@ -1,0 +1,530 @@
+================================================================================
+SAP CPI TEST PAYLOADS: CREATE POSITION FROM BPA TO SSFF
+Integration Flow Test Suite
+================================================================================
+
+================================================================================
+TEST PAYLOAD 1: VALID HAPPY PATH
+================================================================================
+
+Scenario:
+  Complete, well-formed position data with all required and optional fields.
+  Expected to successfully create a new position in SuccessFactors.
+
+Endpoint:
+  POST {{IFLOW_URL}}
+
+Request Headers:
+  Content-Type: application/json
+  Authorization: Bearer <valid_JWT_token_with_ESBMessaging.send_role>
+
+Request Payload:
+{
+  "code": "POS-2025-00142",
+  "effectiveStartDate": "2025-06-01",
+  "effectiveStatus": "ACTIVE",
+  "changeReason": "NEW_HIRE",
+  "company": "COMP_001",
+  "costCenter": "CC-5200-ENGINEERING",
+  "department": "DEPT_ENG_001",
+  "location": "San Francisco, CA",
+  "targetFTE": 1.0,
+  "regularTemporary": "R",
+  "vacant": false,
+  "externalName_defaultValue": "Senior Software Engineer - Platform",
+  "cust_ManagerPosition": "POS-2024-00098",
+  "cust_careertrack": "TRACK_ENGINEERING",
+  "cust_jobcluster": "CLUSTER_ENGINEERING",
+  "cust_newjobfamily": "FAMILY_SOFTWARE_DEV",
+  "cust_jobrole": "ROLE_SENIOR_ENGINEER",
+  "cust_standardHours": 40,
+  "cust_BusinessSpecificClassification": "CLASS_EXEMPT_SALARIED",
+  "parentPosition": {
+    "code": "POS-2024-00050"
+  }
+}
+
+Expected CPI Behavior:
+
+  1. HTTPS Adapter validates authentication and XSRF protection
+  2. Enhance JSON Payload enricher wraps data: {"Position": [{ /* payload */ }]}
+  3. JSON to XML Converter transforms to XML with namespace handling
+  4. BPA to SSFF Mapping applies all field transformations:
+     - Maps all 19 UPSERT fields to SuccessFactors OData schema
+     - Validates date format (YYYY-MM-DD) → OData format
+     - Processes custom fields (cust_*) to target schema
+     - Maps hierarchical relationship via parentPosition/code
+  5. Post in SSFF Service Task executes OData V2 UPSERT:
+     - SuccessFactors API receives position creation request
+     - Position is created with status ACTIVE
+     - Response returns status: SUCCESS
+  6. Router Gateway evaluates response status (SUCCESS)
+  7. Default route taken (success path)
+  8. Convert Response to JSON transforms XML response to JSON
+  9. End Event returns success response to BPA system
+
+Expected HTTP Response:
+  Status Code: 200 OK
+  Content-Type: application/json
+  
+  {
+    "UpsertResponses": {
+      "PositionUpsertResponse": {
+        "status": "SUCCESS",
+        "code": "POS-2025-00142",
+        "message": "Position created successfully in SuccessFactors"
+      }
+    }
+  }
+
+Monitoring Observations:
+  • Message processing time: 2-5 seconds (typical OData latency)
+  • No retry attempts triggered
+  • All sequence flows executed in order: SF_3 → SF_21 → SF_9 → SF_16 → SF_5
+  • Router gateway routes to success path (SequenceFlow_23)
+  • Logs show "All events" captured for full audit trail
+
+
+================================================================================
+TEST PAYLOAD 2: MISSING OPTIONAL FIELDS
+================================================================================
+
+Scenario:
+  Payload with only mandatory fields, all optional fields omitted.
+  Tests whether integration handles sparse payloads gracefully.
+  Expected: Position creation succeeds with defaults applied by SuccessFactors.
+
+Request Payload:
+{
+  "code": "POS-2025-00143",
+  "effectiveStartDate": "2025-06-15",
+  "effectiveStatus": "ACTIVE",
+  "company": "COMP_001",
+  "department": "DEPT_HR_002"
+}
+
+Expected CPI Behavior:
+
+  1. Payload validation passes (mandatory fields present)
+  2. Enrichment wrapping succeeds despite sparse data
+  3. JSON to XML conversion successful
+  4. BPA to SSFF Mapping processes available fields:
+     - Only provided fields mapped to OData schema
+     - Missing optional fields (costCenter, location, cust_*) → NOT sent to API
+     - SuccessFactors applies internal defaults for unmapped fields
+  5. OData V2 UPSERT request includes only populated fields
+  6. SuccessFactors API accepts minimal position with defaults
+  7. Response status: SUCCESS
+  8. Response returned to BPA system
+
+Expected HTTP Response:
+  Status Code: 200 OK
+  
+  {
+    "UpsertResponses": {
+      "PositionUpsertResponse": {
+        "status": "SUCCESS",
+        "code": "POS-2025-00143",
+        "message": "Position created with default values"
+      }
+    }
+  }
+
+Monitoring Observations:
+  • Message processing time: 1.5-3 seconds (faster due to smaller payload)
+  • No mapping errors logged despite missing optional fields
+  • SuccessFactors applies internal cost center and location defaults
+  • Integration behavior: PASS (graceful handling of sparse data)
+
+
+================================================================================
+TEST PAYLOAD 3: MISSING MANDATORY FIELDS
+================================================================================
+
+Scenario:
+  Payload missing critical mandatory fields required by SuccessFactors OData.
+  Expected: Integration detects missing fields → Error End Event triggered.
+
+Request Payload:
+{
+  "code": "POS-2025-00144",
+  "effectiveStatus": "ACTIVE",
+  "company": "COMP_001"
+}
+
+Note: Missing mandatory fields:
+  - effectiveStartDate (REQUIRED by OData)
+  - department (REQUIRED by business rule)
+
+Expected CPI Behavior:
+
+  1. Enrichment wrapping succeeds
+  2. JSON to XML conversion succeeds
+  3. BPA to SSFF Mapping detects missing mandatory field: effectiveStartDate
+     - Mapping validation fails
+     - Exception logged: "Missing mandatory field: effectiveStartDate"
+  4. Mapping throws validation error → Flow terminates
+  5. Exception propagates to flow level
+  6. Error handling triggered
+  7. Flow ends with error → Exception returned to BPA system
+
+Expected HTTP Response:
+  Status Code: 400 Bad Request
+  Content-Type: application/json
+  
+  {
+    "error": {
+      "message": "Mapping validation failed",
+      "details": "Missing mandatory field: effectiveStartDate",
+      "timestamp": "2026-05-06T12:15:32Z",
+      "integrationFlowName": "Create Position from BPA to SSFF"
+    }
+  }
+
+Alternative Response (if mapping error not caught early):
+  Status Code: 200 OK (SuccessFactors rejects request)
+  
+  {
+    "UpsertResponses": {
+      "PositionUpsertResponse": {
+        "status": "ERROR",
+        "code": "POS-2025-00144",
+        "errorMessage": "Mandatory field effectiveStartDate is required"
+      }
+    }
+  }
+
+Monitoring Observations:
+  • Message processing time: <1 second (fails at mapping stage)
+  • Mapping activity logs error: "Validation failed - missing mandatory fields"
+  • Router Gateway condition evaluates status = 'ERROR'
+  • SequenceFlow_26 triggered (error route)
+  • Error End Event termination
+  • Alert triggered: "Position creation failed - missing mandatory data"
+  • Integration behavior: PASS (error handling works correctly)
+
+
+================================================================================
+TEST PAYLOAD 4: INVALID FIELD FORMATS
+================================================================================
+
+Scenario:
+  Payload with fields in incorrect data types or invalid formats.
+  Tests data type validation and format conversion robustness.
+
+Request Payload:
+{
+  "code": "POS-2025-00145",
+  "effectiveStartDate": "06-15-2025",
+  "effectiveStatus": "ACTIVE",
+  "company": "COMP_001",
+  "department": "DEPT_SALES_001",
+  "changeReason": "INVALID_REASON",
+  "targetFTE": "1.5X",
+  "regularTemporary": "UNKNOWN",
+  "vacant": "yes",
+  "cust_standardHours": "forty",
+  "parentPosition": {
+    "code": 12345
+  }
+}
+
+Issues in payload:
+  - effectiveStartDate: Invalid format "06-15-2025" (expected YYYY-MM-DD)
+  - changeReason: Invalid enum value "INVALID_REASON"
+  - targetFTE: String "1.5X" instead of numeric 1.5
+  - regularTemporary: Invalid enum "UNKNOWN" (expected R/T)
+  - vacant: String "yes" instead of boolean false
+  - cust_standardHours: String "forty" instead of numeric 40
+  - parentPosition/code: Numeric 12345 instead of string "POS-XXXX-XXXXX"
+
+Expected CPI Behavior:
+
+  1. Enrichment wrapping succeeds (no type validation at this stage)
+  2. JSON to XML conversion succeeds (XML allows mixed types)
+  3. BPA to SSFF Mapping applies data type conversions:
+     - Date format conversion fails: "06-15-2025" → DateTime parse exception
+     - Mapping detects invalid date format
+     - Exception: "Invalid date format for effectiveStartDate"
+  4. Mapping error caught → Alternatively:
+     - If conversion is attempted on numeric fields (targetFTE, hours):
+       - String "1.5X" and "forty" cannot convert to number
+       - NumberFormatException logged
+  5. Mapping validation fails
+  6. Error message returned to BPA
+  7. Error End Event triggered
+
+Expected HTTP Response:
+  Status Code: 400 Bad Request
+  
+  {
+    "error": {
+      "message": "Data type conversion error during mapping",
+      "details": "Invalid date format for effectiveStartDate: Expected YYYY-MM-DD, got 06-15-2025",
+      "field": "effectiveStartDate",
+      "integrationFlowName": "Create Position from BPA to SSFF"
+    }
+  }
+
+Alternative if OData receives request:
+  Status Code: 200 OK
+  
+  {
+    "UpsertResponses": {
+      "PositionUpsertResponse": {
+        "status": "ERROR",
+        "code": "POS-2025-00145",
+        "errorMessage": "Invalid field format: targetFTE must be numeric, received 1.5X"
+      }
+    }
+  }
+
+Monitoring Observations:
+  • Message processing time: <2 seconds (fails during mapping)
+  • Mapping logs: "Type conversion failed for field targetFTE"
+  • Error End Event triggered
+  • Alert: "Format validation error - check payload field types"
+  • Integration behavior: PASS (format validation prevents bad data)
+
+
+================================================================================
+TEST PAYLOAD 5: UNEXPECTED EXTRA FIELDS
+================================================================================
+
+Scenario:
+  Payload contains valid data plus extra fields not defined in SuccessFactors schema.
+  Tests whether integration filters unknown fields or propagates them.
+
+Request Payload:
+{
+  "code": "POS-2025-00146",
+  "effectiveStartDate": "2025-07-01",
+  "effectiveStatus": "ACTIVE",
+  "company": "COMP_001",
+  "department": "DEPT_FINANCE_001",
+  "targetFTE": 1.0,
+  "regularTemporary": "R",
+  "bpa_internal_id": "INT_12345",
+  "bpa_legacy_code": "OLD_POS_98765",
+  "bpa_sync_timestamp": "2026-05-06T10:30:00Z",
+  "bpa_source_system": "LEGACY_HR",
+  "bpa_approval_status": "APPROVED_BY_CFO",
+  "metadata": {
+    "created_by": "john.smith@bpa.com",
+    "created_date": "2026-05-05",
+    "priority": "HIGH"
+  },
+  "internal_notes": "This position was previously rejected due to budget constraints"
+}
+
+Extra fields not in SuccessFactors schema:
+  - bpa_internal_id, bpa_legacy_code, bpa_sync_timestamp, bpa_source_system, 
+    bpa_approval_status, metadata, internal_notes
+
+Expected CPI Behavior:
+
+  1. JSON enrichment wraps full payload including extra fields
+  2. JSON to XML conversion includes all fields in XML structure
+  3. BPA to SSFF Mapping processes only defined source-to-target mappings:
+     - Reads: code, effectiveStartDate, effectiveStatus, company, department, 
+              targetFTE, regularTemporary, (and others if present)
+     - Ignores: bpa_internal_id, bpa_legacy_code, metadata, internal_notes, etc.
+     - Mapping logic filters to UPSERT fields only (19 fields defined)
+  4. OData V2 UPSERT request constructed with only mapped fields:
+     - Extra fields NOT included in XML UPSERT envelope
+     - SuccessFactors API never sees bpa_* or metadata fields
+  5. Position creation succeeds
+  6. Response status: SUCCESS
+  7. BPA receives success response (extra fields silently ignored)
+
+Expected HTTP Response:
+  Status Code: 200 OK
+  
+  {
+    "UpsertResponses": {
+      "PositionUpsertResponse": {
+        "status": "SUCCESS",
+        "code": "POS-2025-00146",
+        "message": "Position created successfully"
+      }
+    }
+  }
+
+Monitoring Observations:
+  • Message processing time: 2-4 seconds (extra processing for extra fields)
+  • JSON to XML conversion includes extra fields (larger XML intermediate)
+  • Mapping logs: "Ignoring non-schema fields: bpa_internal_id, bpa_legacy_code, ..."
+  • OData request payload contains only 19 UPSERT fields (extra fields stripped)
+  • No error triggered (graceful field filtering)
+  • Integration behavior: PASS (robust field filtering in place)
+
+
+================================================================================
+TEST PAYLOAD 6: ERROR HANDLING TRIGGER - ODATA API REJECTION
+================================================================================
+
+Scenario:
+  Payload is structurally valid but violates SuccessFactors business rules.
+  Expected: SuccessFactors API rejects UPSERT → Response status = ERROR
+  → Router Gateway routes to Error End Event.
+
+Request Payload:
+{
+  "code": "POS-2025-00147",
+  "effectiveStartDate": "2025-05-01",
+  "effectiveStatus": "ACTIVE",
+  "changeReason": "NEW_HIRE",
+  "company": "COMP_INVALID",
+  "department": "DEPT_NONEXISTENT_999",
+  "location": "Mars, Alpha Centauri",
+  "targetFTE": 2.5,
+  "regularTemporary": "R",
+  "vacant": false,
+  "externalName_defaultValue": "Impossible Role - Mars",
+  "cust_ManagerPosition": "POS-INVALID-MANAGER",
+  "cust_careertrack": "TRACK_NONEXISTENT",
+  "cust_jobcluster": "CLUSTER_FUTURE_TECH",
+  "cust_newjobfamily": "FAMILY_SPACE_PROGRAM",
+  "cust_jobrole": "ROLE_MARS_EXPLORER",
+  "cust_standardHours": 168,
+  "cust_BusinessSpecificClassification": "CLASS_UNKNOWN",
+  "parentPosition": {
+    "code": "POS-NONEXISTENT"
+  }
+}
+
+Issues (business rule violations):
+  - company "COMP_INVALID" → Does not exist in SuccessFactors
+  - department "DEPT_NONEXISTENT_999" → Invalid department code
+  - cust_ManagerPosition "POS-INVALID-MANAGER" → Manager position does not exist
+  - parentPosition code → Does not exist
+  - targetFTE 2.5 → May violate org constraints
+  - cust_jobrole "ROLE_MARS_EXPLORER" → Invalid enumeration value
+
+Expected CPI Behavior:
+
+  1. JSON enrichment succeeds (structurally valid)
+  2. JSON to XML conversion succeeds
+  3. BPA to SSFF Mapping applies transformations:
+     - All data type conversions succeed (valid types)
+     - All mapped fields converted to OData format
+  4. Post in SSFF Service Task sends UPSERT request to SuccessFactors API
+  5. SuccessFactors API validation fails:
+     - Company code not found in system
+     - Department code invalid
+     - Manager position does not exist
+     - Parent position reference invalid
+  6. SuccessFactors returns HTTP 400/422 or OData error response:
+     
+     XML Response Example:
+     <UpsertResponses>
+       <PositionUpsertResponse>
+         <status>ERROR</status>
+         <code>POS-2025-00147</code>
+         <errorMessage>
+           Validation failed: Company COMP_INVALID does not exist; 
+           Manager position POS-INVALID-MANAGER not found
+         </errorMessage>
+       </PositionUpsertResponse>
+     </UpsertResponses>
+  
+  7. Post in SSFF Service Task receives error response
+  8. Response routed to Router Gateway 1 (ExclusiveGateway_22)
+  9. Gateway evaluates condition: /UpsertResponses/PositionUpsertResponse/status = 'ERROR'
+     → Condition MATCHES
+  10. SequenceFlow_26 triggered (error route)
+  11. Flow routes to Error End Event
+  12. Error End Event terminates flow with error status
+  13. Exception returned to BPA system
+
+Expected HTTP Response:
+  Status Code: 200 OK (CPI accepted and processed; error from SuccessFactors)
+  
+  {
+    "UpsertResponses": {
+      "PositionUpsertResponse": {
+        "status": "ERROR",
+        "code": "POS-2025-00147",
+        "errorMessage": "Business rule validation failed: Company COMP_INVALID not found; Manager position POS-INVALID-MANAGER does not exist"
+      }
+    }
+  }
+
+Monitoring Observations:
+  • Message processing time: 3-6 seconds (attempt UPSERT, receive rejection)
+  • Sequence flow SequenceFlow_5 executes (response received)
+  • Router Gateway routes condition = ERROR evaluated as TRUE
+  • SequenceFlow_26 triggered (error path)
+  • Error End Event captured in monitoring
+  • Alert: "Position UPSERT rejected by SuccessFactors: Business rule violation"
+  • Logs show: "ERROR status detected in PositionUpsertResponse"
+  • No retry attempted (single retry applies to connection failure, not business error)
+  • Integration behavior: PASS (error routing works as designed)
+
+Recommended Follow-up Actions:
+  • Investigate company/department/manager codes in SuccessFactors
+  • Validate master data in BPA system before sending
+  • Consider implementing dead-letter queue for business rule violations
+  • Add monitoring alert to notify data governance team
+
+
+================================================================================
+SUMMARY: TEST COVERAGE MATRIX
+================================================================================
+
+Test ID | Payload Type              | Expected Outcome      | CPI Path         | HTTP Status | Pass/Fail
+---------------------------------------------------------------------------
+1       | Valid Happy Path          | SUCCESS               | Success path     | 200         | PASS
+2       | Missing Optional Fields   | SUCCESS (with defaults)| Success path     | 200         | PASS
+3       | Missing Mandatory Fields  | ERROR (validation)    | Error path       | 400/200*    | PASS
+4       | Invalid Field Formats     | ERROR (conversion)    | Error path       | 400/200*    | PASS
+5       | Extra Unknown Fields      | SUCCESS (filtered)    | Success path     | 200         | PASS
+6       | SuccessFactors Rejection  | ERROR (API validation)| Error path       | 200         | PASS
+
+*Status code depends on where error is detected (mapping=400, SuccessFactors=200)
+
+
+================================================================================
+TESTING RECOMMENDATIONS
+================================================================================
+
+1. Execution Order
+   • Execute test payloads in order 1 → 6 to progressively test coverage
+   • Payload 1 validates baseline happy path
+   • Payloads 2-5 test edge cases and robustness
+   • Payload 6 validates error handling mechanism
+
+2. Monitoring During Tests
+   • Watch CPI Message Monitoring dashboard for each payload
+   • Track sequence flow execution and router gateway decisions
+   • Verify error end event is triggered for payloads 3, 4, 6
+   • Verify success end event for payloads 1, 2, 5
+
+3. SuccessFactors Verification
+   • After each successful test (1, 2, 5), verify position created in SF
+   • Check that field values are correctly mapped
+   • Verify custom fields (cust_*) appear in SF
+   • For test 2, confirm defaults were applied
+
+4. Network & Connectivity
+   • Verify {{SSFF_HOST}} is reachable on HTTPS port 443
+   • Confirm {{SSFF_Credential}} OAuth2 token is valid
+   • Test with network latency simulation (1 second timeout)
+
+5. Security Testing
+   • Payload 1: Verify XSRF protection active (check headers)
+   • Test with invalid/expired JWT token (should return 401)
+   • Test with missing ESBMessaging.send role (should return 403)
+
+6. Load & Performance
+   • Execute payload 1 multiple times in rapid succession
+   • Monitor processing time and retry behavior
+   • Verify no message loss or queueing issues
+
+
+================================================================================
+Document Version:    1.0
+Date Generated:      2026-05-06
+Test Suite:          BPA to SSFF Integration Flow
+Integration:         Create Position from BPA to SSFF
+================================================================================
